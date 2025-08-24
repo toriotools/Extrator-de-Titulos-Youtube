@@ -1,0 +1,7 @@
+{
+  "name": "Extractor de Títulos do YouTube",
+  "description": "Uma aplicação web para extrair todos os títulos de vídeos públicos e suas contagens de visualizações de um determinado URL de canal do YouTube.",
+  "requestFramePermissions": [
+    "clipboard-read"
+  ]
+}
