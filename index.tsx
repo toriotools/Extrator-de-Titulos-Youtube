@@ -1,7 +1,617 @@
-import React from 'react';
-import ReactDOM from 'react-dom/client';
-import App from './App';
 
+import React, { useState, useCallback, useEffect } from 'react';
+import ReactDOM from 'react-dom/client';
+
+// --- INÍCIO: Conteúdo de types.ts ---
+interface VideoData {
+  id: string;
+  title: string;
+  views: string;
+  publishedAt?: string;
+}
+
+enum ExtractionState {
+  IDLE,
+  VALIDATING_INPUT,
+  FETCHING_CHANNEL_INFO_API,
+  FETCHING_PLAYLIST_ITEMS_API,
+  FETCHING_VIDEO_STATS_API,
+  COMPLETED,
+  ERROR,
+}
+
+interface ExtractionProgress {
+  state: ExtractionState;
+  message: string;
+  videosFound: number;
+  videosProcessedForStats: number;
+  currentPage?: number;
+  totalPages?: number;
+}
+
+interface ChannelListResponse {
+  items?: ChannelResource[];
+  error?: ApiError;
+}
+interface ChannelResource {
+  id: string;
+  snippet?: { title: string; };
+  contentDetails?: { relatedPlaylists?: { uploads?: string; }; };
+}
+interface PlaylistItemListResponse {
+  items?: PlaylistItemResource[];
+  nextPageToken?: string;
+  pageInfo?: { totalResults?: number; resultsPerPage?: number; };
+  error?: ApiError;
+}
+interface PlaylistItemResource {
+  snippet?: {
+    title: string;
+    publishedAt?: string;
+    resourceId?: { videoId?: string; };
+  };
+}
+interface VideoListResponse {
+  items?: VideoResource[];
+  error?: ApiError;
+}
+interface VideoResource {
+  id: string;
+  statistics?: { viewCount?: string; };
+}
+interface ApiError {
+  code: number;
+  message: string;
+}
+// --- FIM: Conteúdo de types.ts ---
+
+
+// --- INÍCIO: Conteúdo de utils/formattingUtils.ts ---
+const formatBrazilianNumber = (value: string | number | undefined | null): string => {
+  if (value === undefined || value === null) return 'N/A';
+  const num = typeof value === 'string' ? parseInt(value.replace(/[^0-9]/g, ''), 10) : Number(value);
+  if (isNaN(num)) {
+    return typeof value === 'string' ? value : 'N/A';
+  }
+  return new Intl.NumberFormat('pt-BR').format(num);
+};
+
+const formatIsoDateToBrazilian = (isoDateString?: string): string => {
+  if (!isoDateString) return 'N/A';
+  try {
+    const date = new Date(isoDateString);
+    if (isNaN(date.getTime())) {
+        return 'Data Inválida';
+    }
+    const day = String(date.getUTCDate()).padStart(2, '0');
+    const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+    const year = date.getUTCFullYear();
+    return `${day}/${month}/${year}`;
+  } catch (error) {
+    console.error("Error formatting date:", isoDateString, error);
+    return 'N/A'; 
+  }
+};
+// --- FIM: Conteúdo de utils/formattingUtils.ts ---
+
+
+// --- INÍCIO: Conteúdo de utils/exportUtils.ts ---
+declare var XLSX: any; 
+
+const createDownloadLink = (blob: Blob, filename: string): void => {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+};
+
+const copyToClipboard = (text: string): Promise<void> => {
+  return navigator.clipboard.writeText(text)
+    .catch((err) => {
+      console.error('Falha ao copiar para a área de transferência: ', err);
+      alert('Falha ao copiar. Verifique as permissões do navegador ou copie manualmente.');
+      return Promise.reject(err);
+    });
+};
+
+const downloadTxt = (content: string, filename: string): void => {
+  const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+  createDownloadLink(blob, filename);
+};
+
+const downloadMd = (content: string, filename: string): void => {
+  const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
+  createDownloadLink(blob, filename);
+};
+
+const downloadCsv = (videos: VideoData[], filename: string): void => {
+  const header = '"Título do Vídeo","Visualizações","Data de Publicação"\n';
+  const rows = videos.map(v => 
+    `"${(v.title || '').replace(/"/g, '""')}","${formatBrazilianNumber(v.views)}","${formatIsoDateToBrazilian(v.publishedAt)}"`
+  ).join('\n');
+  const csvContent = header + rows;
+  const blob = new Blob([`\uFEFF${csvContent}`], { type: 'text/csv;charset=utf-8' });
+  createDownloadLink(blob, filename);
+};
+
+const downloadXlsx = (videos: VideoData[], filename: string): void => {
+  if (typeof XLSX === 'undefined') {
+    alert('A biblioteca XLSX (SheetJS) não foi carregada. Não é possível exportar para .xlsx.');
+    console.error('SheetJS (XLSX) library not found.');
+    return;
+  }
+  const worksheetData = videos.map(v => ({
+    'Título do Vídeo': v.title || '',
+    'Visualizações': formatBrazilianNumber(v.views),
+    'Data de Publicação': formatIsoDateToBrazilian(v.publishedAt),
+  }));
+
+  try {
+    const worksheet = XLSX.utils.json_to_sheet(worksheetData);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Títulos YouTube');
+    
+    const titleMaxLength = Math.max(...worksheetData.map(r => r['Título do Vídeo'].length), 'Título do Vídeo'.length);
+    const viewsMaxLength = Math.max(...worksheetData.map(r => r['Visualizações'].length), 'Visualizações'.length);
+    const dateMaxLength = Math.max(...worksheetData.map(r => r['Data de Publicação'].length), 'Data de Publicação'.length);
+
+    const colWidths = [
+        { wch: Math.min(Math.max(titleMaxLength, 10), 80) }, 
+        { wch: Math.min(Math.max(viewsMaxLength, 10), 20) },
+        { wch: Math.min(Math.max(dateMaxLength, 10), 20) } 
+    ]; 
+    worksheet['!cols'] = colWidths;
+
+    XLSX.writeFile(workbook, filename, { bookType: 'xlsx', type: 'binary' });
+  } catch (e) {
+    console.error("Error creating XLSX file:", e);
+    alert("Ocorreu um erro ao gerar o arquivo .xlsx.");
+  }
+};
+// --- FIM: Conteúdo de utils/exportUtils.ts ---
+
+
+// --- INÍCIO: Conteúdo de services/youtubeExtractorService.ts ---
+const YOUTUBE_API_BASE_URL = 'https://www.googleapis.com/youtube/v3';
+const MAX_RESULTS_PER_PAGE = 50;
+
+interface ChannelIdentifier {
+  type: 'id' | 'forHandle' | 'forUsername';
+  value: string;
+}
+
+const getChannelIdentifier = (youtubeUrl: string): ChannelIdentifier | null => {
+  try {
+    const url = new URL(youtubeUrl);
+    const pathSegments = url.pathname.split('/').filter(Boolean);
+
+    if (pathSegments.length >= 1) {
+      const firstSegment = pathSegments[0];
+      const secondSegment = pathSegments[1];
+
+      if (firstSegment.startsWith('@')) return { type: 'forHandle', value: firstSegment };
+      if (firstSegment === 'channel' && secondSegment) return { type: 'id', value: secondSegment };
+      if (firstSegment === 'c' && secondSegment) return { type: 'forUsername', value: secondSegment };
+      if (firstSegment === 'user' && secondSegment) return { type: 'forUsername', value: secondSegment };
+      if (pathSegments.length === 1 && !['channel', 'c', 'user'].includes(firstSegment)) {
+         if (firstSegment.startsWith('UC')) return { type: 'id', value: firstSegment };
+        return { type: 'forHandle', value: firstSegment };
+      }
+    }
+  } catch (e) { console.error("Error parsing YouTube URL:", e); }
+  return null;
+};
+
+interface ApiServiceResult {
+  officialChannelTitle: string | null;
+  videos: VideoData[];
+  error: string | null;
+}
+
+type ProgressCallback = (update: Partial<ExtractionProgress>) => void;
+
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+const extractChannelVideosViaAPI = async (
+  channelUrl: string,
+  apiKey: string,
+  onProgress: ProgressCallback
+): Promise<ApiServiceResult> => {
+  if (!apiKey) return { officialChannelTitle: null, videos: [], error: 'Chave da API do YouTube é obrigatória.' };
+
+  onProgress({ state: ExtractionState.VALIDATING_INPUT, message: 'Identificando canal...' });
+  const identifier = getChannelIdentifier(channelUrl);
+  if (!identifier) return { officialChannelTitle: null, videos: [], error: 'Não foi possível identificar o canal a partir da URL fornecida.' };
+
+  let officialChannelTitle: string | null = null;
+
+  try {
+    onProgress({ state: ExtractionState.FETCHING_CHANNEL_INFO_API, message: 'Buscando informações do canal...' });
+    let channelApiUrl = `${YOUTUBE_API_BASE_URL}/channels?part=snippet,contentDetails&key=${apiKey}`;
+    if (identifier.type === 'id') channelApiUrl += `&id=${identifier.value}`;
+    else if (identifier.type === 'forHandle') channelApiUrl += `&forHandle=${identifier.value.replace('@','')}`;
+    else channelApiUrl += `&forUsername=${identifier.value}`;
+    
+    const channelResponse = await fetch(channelApiUrl);
+    const channelData: ChannelListResponse = await channelResponse.json();
+
+    if (!channelResponse.ok || channelData.error) throw new Error(channelData.error?.message || `Erro da API: ${channelResponse.status}`);
+    if (!channelData.items || channelData.items.length === 0) throw new Error('Canal não encontrado pela API.');
+    
+    const channelResource = channelData.items[0];
+    officialChannelTitle = channelResource.snippet?.title || 'Canal Sem Título';
+    const uploadsPlaylistId = channelResource.contentDetails?.relatedPlaylists?.uploads;
+    if (!uploadsPlaylistId) throw new Error('Não foi possível encontrar a playlist de uploads do canal.');
+
+    onProgress({ message: `Canal "${officialChannelTitle}" encontrado. Buscando vídeos...` });
+
+    const allVideoItems: { id: string; title: string; publishedAt?: string }[] = [];
+    let nextPageToken: string | undefined = undefined;
+    let currentPage = 0;
+    let totalPagesEstimate = 1;
+
+    onProgress({ state: ExtractionState.FETCHING_PLAYLIST_ITEMS_API, message: 'Buscando lista de vídeos...' });
+
+    do {
+      currentPage++;
+      let playlistItemsApiUrl = `${YOUTUBE_API_BASE_URL}/playlistItems?part=snippet&playlistId=${uploadsPlaylistId}&maxResults=${MAX_RESULTS_PER_PAGE}&key=${apiKey}`;
+      if (nextPageToken) playlistItemsApiUrl += `&pageToken=${nextPageToken}`;
+      
+      const playlistItemsResponse = await fetch(playlistItemsApiUrl);
+      const playlistItemsData: PlaylistItemListResponse = await playlistItemsResponse.json();
+
+      if (!playlistItemsResponse.ok || playlistItemsData.error) throw new Error(playlistItemsData.error?.message || `Erro ao buscar vídeos: ${playlistItemsResponse.status}`);
+      
+      if (playlistItemsData.pageInfo?.totalResults && currentPage === 1) {
+        totalPagesEstimate = Math.ceil(playlistItemsData.pageInfo.totalResults / MAX_RESULTS_PER_PAGE);
+      }
+      onProgress({ currentPage, totalPages: totalPagesEstimate });
+
+      playlistItemsData.items?.forEach(item => {
+        if (item.snippet?.resourceId?.videoId && item.snippet?.title) {
+          allVideoItems.push({
+            id: item.snippet.resourceId.videoId,
+            title: item.snippet.title,
+            publishedAt: item.snippet.publishedAt,
+          });
+        }
+      });
+      onProgress({ videosFound: allVideoItems.length });
+      nextPageToken = playlistItemsData.nextPageToken;
+    } while (nextPageToken);
+    
+    onProgress({ message: `${allVideoItems.length} IDs de vídeo obtidos. Buscando estatísticas...`, state: ExtractionState.FETCHING_VIDEO_STATS_API, videosProcessedForStats: 0 });
+    const finalVideos: VideoData[] = [];
+    for (let i = 0; i < allVideoItems.length; i += MAX_RESULTS_PER_PAGE) {
+      const batchItems = allVideoItems.slice(i, i + MAX_RESULTS_PER_PAGE);
+      const videoIds = batchItems.map(v => v.id).join(',');
+      const videoStatsApiUrl = `${YOUTUBE_API_BASE_URL}/videos?part=statistics&id=${videoIds}&key=${apiKey}`;
+      
+      const videoStatsResponse = await fetch(videoStatsApiUrl);
+      const videoStatsData: VideoListResponse = await videoStatsResponse.json();
+
+      const statsMap = new Map<string, string>();
+      videoStatsData.items?.forEach(video => statsMap.set(video.id, video.statistics?.viewCount || '0'));
+      
+      batchItems.forEach(item => {
+        finalVideos.push({
+          id: item.id,
+          title: item.title,
+          views: statsMap.get(item.id) || 'N/A',
+          publishedAt: item.publishedAt,
+        });
+      });
+      onProgress({ videosProcessedForStats: finalVideos.length });
+    }
+    
+    onProgress({ state: ExtractionState.COMPLETED, message: `Extração concluída. ${finalVideos.length} vídeos processados.` });
+    return { officialChannelTitle, videos: finalVideos, error: null };
+
+  } catch (e: any) {
+    console.error('Extraction Service Error:', e);
+    return { officialChannelTitle, videos: [], error: e.message || 'Ocorreu um erro desconhecido.' };
+  }
+};
+// --- FIM: Conteúdo de services/youtubeExtractorService.ts ---
+
+
+// --- INÍCIO: Conteúdo de components/ApiKeyInput.tsx ---
+const ApiKeyInput = ({ apiKey, setApiKey, onSaveKey, onClearKey, disabled }) => {
+  const handlePasteKey = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) setApiKey(text);
+    } catch (err) {
+      console.error('Falha ao colar da área de transferência:', err);
+      alert('Falha ao colar da área de transferência. Verifique as permissões do navegador.');
+    }
+  };
+
+  return (
+    <section aria-labelledby="api-key-section-title" className="space-y-4">
+      <h3 id="api-key-section-title" className="sr-only">Configuração da Chave de API do YouTube</h3>
+      <div>
+        <label htmlFor="youtube-api-key" className="block text-sm font-medium text-sky-300 mb-1">
+          Sua Chave da API do YouTube Data v3 (Obrigatória)
+        </label>
+        <div className="flex flex-col sm:flex-row items-stretch gap-2">
+          <input
+            type="password"
+            id="youtube-api-key"
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+            placeholder="Cole sua chave de API aqui (Ex: AIzaSy...)"
+            className="flex-grow px-4 py-3 bg-slate-700 border border-slate-600 rounded-md shadow-sm focus:ring-2 focus:ring-sky-500 focus:border-sky-500 placeholder-slate-500 text-slate-100 text-base sm:text-lg transition-colors"
+            disabled={disabled}
+          />
+          <button type="button" onClick={handlePasteKey} className="px-4 py-3 bg-slate-600 hover:bg-slate-500 text-slate-200 hover:text-white rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-sky-500 disabled:opacity-70 disabled:cursor-not-allowed transition-colors text-sm sm:text-base" disabled={disabled}>Colar Chave</button>
+        </div>
+      </div>
+      <div className="flex flex-col sm:flex-row gap-2 sm:gap-3">
+        <button type="button" onClick={() => onSaveKey(apiKey)} className="px-5 py-2.5 bg-sky-600 hover:bg-sky-700 text-white font-medium rounded-md shadow-sm disabled:bg-slate-500 disabled:opacity-70 disabled:cursor-not-allowed transition-colors" disabled={disabled}>Salvar Chave</button>
+        <button type="button" onClick={onClearKey} className="px-5 py-2.5 bg-red-600 hover:bg-red-700 text-white font-medium rounded-md shadow-sm disabled:bg-slate-500 disabled:opacity-70 disabled:cursor-not-allowed transition-colors" disabled={disabled || !apiKey}>Limpar Chave</button>
+      </div>
+      <p className="mt-2 text-xs text-slate-400">
+        Uma chave da API do YouTube Data v3 é <strong>obrigatória</strong>. Ela é salva apenas no seu navegador.
+        <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer" className="text-sky-400 hover:text-sky-300 underline ml-1">Obtenha uma chave aqui.</a>
+      </p>
+    </section>
+  );
+};
+// --- FIM: Conteúdo de components/ApiKeyInput.tsx ---
+
+
+// --- INÍCIO: Conteúdo de components/UrlInput.tsx ---
+const UrlInput = ({ channelUrl, setChannelUrl, onExtract, isLoading, buttonText }) => {
+  const handleSubmit = (e) => { e.preventDefault(); if (!isLoading) onExtract(); };
+  const handlePaste = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) setChannelUrl(text);
+    } catch (err) {
+      console.error('Falha ao colar:', err);
+      alert('Falha ao colar. Verifique as permissões do navegador.');
+    }
+  };
+
+  const defaultButtonText = isLoading ? (
+    <>
+      <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+      Extraindo...
+    </>
+  ) : 'Extrair Vídeos (API)';
+
+  return (
+    <section>
+      <form onSubmit={handleSubmit} className="space-y-4">
+        <div>
+          <label htmlFor="youtube-url" className="block text-sm font-medium text-sky-300 mb-1">URL de um Canal, Vídeo ou Playlist do YouTube</label>
+          <div className="flex items-stretch space-x-2">
+            <input type="url" id="youtube-url" value={channelUrl} onChange={(e) => setChannelUrl(e.target.value)} placeholder="Ex: https://www.youtube.com/@MrBeast" required className="flex-grow px-4 py-3 bg-slate-700 border border-slate-600 rounded-md focus:ring-2 focus:ring-sky-500 placeholder-slate-500 text-slate-100 text-lg transition-colors" disabled={isLoading} />
+            <button type="button" onClick={handlePaste} className="px-4 py-3 bg-slate-600 hover:bg-slate-500 text-slate-200 rounded-md disabled:opacity-70 disabled:cursor-not-allowed transition-colors text-base" disabled={isLoading}>Colar</button>
+          </div>
+        </div>
+        <button type="submit" className="w-full flex justify-center items-center px-6 py-3 text-lg font-medium rounded-md text-white bg-sky-600 hover:bg-sky-700 focus:ring-2 focus:ring-sky-500 disabled:bg-slate-500 disabled:opacity-70 disabled:cursor-not-allowed transition-all" disabled={isLoading}>{buttonText || defaultButtonText}</button>
+      </form>
+    </section>
+  );
+};
+// --- FIM: Conteúdo de components/UrlInput.tsx ---
+
+
+// --- INÍCIO: Conteúdo de components/StatusDisplay.tsx ---
+const StatusDisplay = ({ message, progressPercentage, isLoading, isError }) => {
+  const barColor = isError ? 'bg-red-500' : 'bg-sky-500';
+  const textColor = isError ? 'text-red-400' : 'text-slate-300';
+  return (
+    <section aria-live="polite" className="space-y-3 p-4 bg-slate-700/50 rounded-md border border-slate-600/50">
+      <p className={`text-md ${textColor}`}>{message}</p>
+      {isLoading && !isError && (
+        <div className="w-full bg-slate-600 rounded-full h-3 overflow-hidden" title={`Progresso: ${progressPercentage.toFixed(0)}%`}>
+          <div className={`h-3 rounded-full ${barColor} transition-all duration-300 ease-out`} style={{ width: `${progressPercentage}%` }}></div>
+        </div>
+      )}
+    </section>
+  );
+};
+// --- FIM: Conteúdo de components/StatusDisplay.tsx ---
+
+
+// --- INÍCIO: Conteúdo de components/ResultsDisplay.tsx ---
+const ExportButton = ({ onClick, label, fileType = '' }) => {
+  const [copied, setCopied] = useState(false);
+  const handleClick = () => {
+    onClick();
+    if (fileType === 'copy') {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  };
+  return <button onClick={handleClick} className={`w-full px-3 py-2 text-white rounded-md text-sm font-medium transition-all ${copied ? 'bg-green-500 hover:bg-green-600' : 'bg-sky-600 hover:bg-sky-700'}`}>{copied ? 'Copiado!' : label}</button>;
+};
+
+const ResultsDisplay = ({ videos }) => {
+  if (videos.length === 0) return null;
+
+  const textForCopy = videos.map(v => `${v.title} (Visualizações: ${formatBrazilianNumber(v.views)})`).join('\n');
+
+  return (
+    <section className="space-y-6">
+      <h2 className="text-2xl font-semibold text-sky-400">Resultados ({videos.length} vídeos)</h2>
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3">
+        <ExportButton onClick={() => copyToClipboard(textForCopy)} label="Copiar Lista" fileType="copy" />
+        <ExportButton onClick={() => downloadTxt(textForCopy, 'videos.txt')} label=".txt" />
+        <ExportButton onClick={() => downloadCsv(videos, 'videos.csv')} label=".csv" />
+        <ExportButton onClick={() => downloadXlsx(videos, 'videos.xlsx')} label=".xlsx" />
+      </div>
+      <div className="overflow-x-auto bg-slate-700/80 rounded-lg border border-slate-600/70 max-h-[500px]">
+        <table className="min-w-full divide-y divide-slate-600">
+          <thead className="bg-slate-800 sticky top-0 z-10">
+            <tr>
+              <th scope="col" className="px-4 py-3 text-left text-xs font-semibold text-sky-300 uppercase w-16">#</th>
+              <th scope="col" className="px-4 py-3 text-left text-xs font-semibold text-sky-300 uppercase">Título</th>
+              <th scope="col" className="px-4 py-3 text-left text-xs font-semibold text-sky-300 uppercase w-40">Visualizações</th>
+              <th scope="col" className="px-4 py-3 text-left text-xs font-semibold text-sky-300 uppercase w-40">Publicação</th>
+            </tr>
+          </thead>
+          <tbody className="bg-slate-700 divide-y divide-slate-600">
+            {videos.map((video, index) => (
+              <tr key={video.id || index} className="hover:bg-slate-600/50">
+                <td className="px-4 py-3 text-sm text-slate-400">{index + 1}</td>
+                <td className="px-4 py-3 text-sm text-slate-200">{video.title}</td>
+                <td className="px-4 py-3 text-sm text-slate-300">{formatBrazilianNumber(video.views)}</td>
+                <td className="px-4 py-3 text-sm text-slate-300">{formatIsoDateToBrazilian(video.publishedAt)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+};
+// --- FIM: Conteúdo de components/ResultsDisplay.tsx ---
+
+
+// --- INÍCIO: Conteúdo de App.tsx ---
+const LOCAL_STORAGE_API_KEY = 'youtubeExtractorUserApiKey';
+
+const App = () => {
+  const [channelUrl, setChannelUrl] = useState('');
+  const [userApiKey, setUserApiKey] = useState('');
+  const [videos, setVideos] = useState([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [progress, setProgress] = useState({ state: ExtractionState.IDLE, message: 'Configure a chave da API e insira a URL do canal.', videosFound: 0, videosProcessedForStats: 0, currentPage: 0, totalPages: 0 });
+  const [extractionError, setExtractionError] = useState(null);
+  const [channelOfficialTitle, setChannelOfficialTitle] = useState(null);
+  const [channelApiMessage, setChannelApiMessage] = useState('Por favor, configure sua chave da API do YouTube.');
+
+  useEffect(() => {
+    const savedApiKey = localStorage.getItem(LOCAL_STORAGE_API_KEY);
+    if (savedApiKey) {
+      setUserApiKey(savedApiKey);
+      setChannelApiMessage('Chave da API carregada. Pronta para extração.');
+    }
+  }, []);
+
+  const handleSaveApiKey = useCallback((key) => {
+    if (!key.trim()) {
+      localStorage.removeItem(LOCAL_STORAGE_API_KEY);
+      setUserApiKey('');
+      setChannelApiMessage('Chave de API removida.');
+      return;
+    }
+    localStorage.setItem(LOCAL_STORAGE_API_KEY, key);
+    setUserApiKey(key);
+    setChannelApiMessage('Chave da API salva com sucesso!');
+  }, []);
+
+  const handleClearApiKey = useCallback(() => {
+    localStorage.removeItem(LOCAL_STORAGE_API_KEY);
+    setUserApiKey('');
+    setChannelApiMessage('Chave da API removida.');
+  }, []);
+
+  const onProgressUpdate = useCallback((update) => {
+    setProgress(prev => ({ ...prev, ...update }));
+  }, []);
+
+  const handleExtraction = useCallback(async () => {
+    if (!userApiKey) return setChannelApiMessage('ERRO: Chave da API é obrigatória.');
+    if (!channelUrl) return setExtractionError('Por favor, insira uma URL do canal.');
+    
+    setIsLoading(true);
+    setExtractionError(null);
+    setVideos([]);
+    setChannelOfficialTitle(null);
+    onProgressUpdate({ state: ExtractionState.VALIDATING_INPUT, message: 'Iniciando extração...', videosFound: 0, videosProcessedForStats: 0, currentPage: 0, totalPages: 0 });
+
+    const result = await extractChannelVideosViaAPI(channelUrl, userApiKey, onProgressUpdate);
+
+    if (result.error) {
+      setExtractionError(result.error);
+      onProgressUpdate({ state: ExtractionState.ERROR, message: `Erro: ${result.error}` });
+    } else {
+      setChannelOfficialTitle(result.officialChannelTitle);
+      const sorted = [...result.videos].sort((a, b) => Number(b.views) - Number(a.views));
+      setVideos(sorted);
+      onProgressUpdate({ state: ExtractionState.COMPLETED, message: `Extração concluída. ${sorted.length} vídeos encontrados.` });
+    }
+    setIsLoading(false);
+  }, [channelUrl, userApiKey, onProgressUpdate]);
+
+  const getProgressPercentage = () => {
+    if (progress.state === ExtractionState.COMPLETED) return 100;
+    if (progress.state === ExtractionState.IDLE || progress.state === ExtractionState.ERROR) return 0;
+    switch (progress.state) {
+        case ExtractionState.VALIDATING_INPUT: return 5;
+        case ExtractionState.FETCHING_CHANNEL_INFO_API: return 10;
+        case ExtractionState.FETCHING_PLAYLIST_ITEMS_API:
+            const pageProgress = progress.totalPages > 0 ? (progress.currentPage / progress.totalPages) * 70 : 0;
+            return 10 + Math.min(pageProgress, 70);
+        case ExtractionState.FETCHING_VIDEO_STATS_API:
+            const statsProgress = progress.videosFound > 0 ? (progress.videosProcessedForStats / progress.videosFound) * 20 : 0;
+            return 80 + Math.min(statsProgress, 19);
+        default: return 0;
+    }
+  };
+
+  const showResults = progress.state === ExtractionState.COMPLETED && !extractionError && !isLoading;
+
+  return (
+    <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col items-center p-4 sm:p-8">
+      <header className="w-full max-w-7xl text-center mb-10">
+        <h1 className="text-4xl sm:text-5xl font-bold text-sky-400">Extractor de Títulos do YouTube (API)</h1>
+        <p className="mt-3 text-slate-400 text-lg">Extraia títulos e visualizações de canais do YouTube usando a API oficial.</p>
+      </header>
+
+      <div className="w-full max-w-7xl flex flex-col lg:flex-row lg:space-x-8">
+        <div className="lg:w-2/5 xl:w-1/3 space-y-10 mb-10 lg:mb-0">
+          <div className="bg-slate-800 shadow-xl rounded-lg p-6 sm:p-8 space-y-6">
+            <h2 className="text-2xl font-semibold text-sky-400 border-b border-slate-700 pb-3">Passo 1: Chave da API</h2>
+            <ApiKeyInput apiKey={userApiKey} setApiKey={setUserApiKey} onSaveKey={handleSaveApiKey} onClearKey={handleClearApiKey} disabled={isLoading} />
+            {channelApiMessage && !isLoading && <p className={`mt-4 p-3 border rounded-md text-sm ${channelApiMessage.includes('ERRO') ? 'bg-red-500/20 border-red-600 text-red-300' : 'bg-sky-500/10 border-sky-700 text-sky-300'}`}>{channelApiMessage}</p>}
+          </div>
+          <div className="bg-slate-800 shadow-xl rounded-lg p-6 sm:p-8 space-y-6">
+            <h2 className="text-2xl font-semibold text-sky-400 border-b border-slate-700 pb-3">Passo 2: Extrair Vídeos</h2>
+            <UrlInput channelUrl={channelUrl} setChannelUrl={setChannelUrl} onExtract={handleExtraction} isLoading={isLoading || !userApiKey} buttonText={!userApiKey ? "Configure a Chave API" : "Extrair Vídeos"} />
+            {(isLoading || extractionError) && (
+              <div className="my-4 space-y-4">
+                <StatusDisplay message={extractionError || progress.message} progressPercentage={getProgressPercentage()} isLoading={isLoading && !extractionError} isError={!!extractionError} />
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="lg:w-3/5 xl:w-2/3">
+          {showResults ? (
+            <div className="bg-slate-800 shadow-xl rounded-lg p-6 sm:p-8 space-y-6">
+              {channelOfficialTitle && <p className="mb-4 p-3 bg-green-600/20 border border-green-500 rounded-md text-green-200">Canal: {channelOfficialTitle}</p>}
+              {videos.length > 0 ? <ResultsDisplay videos={videos} /> : <p className="text-center text-yellow-400">Nenhum vídeo público encontrado para este canal.</p>}
+            </div>
+          ) : (
+            <div className="bg-slate-800 shadow-xl rounded-lg p-6 sm:p-8 text-center text-slate-400 h-full flex items-center justify-center">
+              <p>{isLoading ? 'Extraindo dados...' : 'Os resultados aparecerão aqui.'}</p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <footer className="w-full max-w-7xl text-center mt-12 py-6 text-slate-500 text-sm border-t border-slate-700">
+        <p>&copy; {new Date().getFullYear()} Extractor de Títulos (API Version).</p>
+        <p className="mt-2">Desenvolvido por <a href="https://www.youtube.com/@toriotools" target="_blank" rel="noopener noreferrer" className="font-semibold text-sky-400 hover:text-sky-300 underline">Tório Tools</a>.</p>
+        <p className="mt-2">Esta versão utiliza a API do YouTube Data v3. Uma chave de API é obrigatória.</p>
+      </footer>
+    </div>
+  );
+};
+// --- FIM: Conteúdo de App.tsx ---
+
+
+// --- INÍCIO: Conteúdo original de index.tsx ---
 const rootElement = document.getElementById('root');
 if (!rootElement) {
   throw new Error("Could not find root element to mount to");
@@ -13,3 +623,4 @@ root.render(
     <App />
   </React.StrictMode>
 );
+// --- FIM: Conteúdo original de index.tsx ---

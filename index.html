@@ -6,6 +6,8 @@
     <title>Extractor de Títulos do YouTube</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
+    <!-- Adicionado Babel Standalone para transpilar JSX no navegador -->
+    <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
     <style>
       body {
         font-family: 'Inter', sans-serif; /* A good sans-serif font often used with Tailwind */
@@ -41,6 +43,7 @@
 </head>
 <body class="bg-slate-900 text-slate-100">
     <div id="root"></div>
-    <script type="module" src="./index.tsx"></script>
+    <!-- Alterado o tipo de script para 'text/babel' para que o Babel possa transpilá-lo -->
+    <script type="text/babel" src="./index.tsx"></script>
 </body>
 </html>
