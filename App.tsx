@@ -1,4 +1,5 @@
 
+
 import React, { useState, useCallback, useEffect } from 'react';
 import { VideoData, ExtractionProgress, ExtractionState } from './types';
 import UrlInput from './components/UrlInput';
@@ -272,7 +273,10 @@ const App: React.FC = () => {
 
       <footer className="w-full max-w-7xl text-center mt-12 py-6 text-slate-500 text-sm border-t border-slate-700">
         <p>&copy; {new Date().getFullYear()} Extractor de Títulos (API Version). Ferramenta para fins educacionais e de demonstração.</p>
-        <p className="mt-1">
+        <p className="mt-2">
+          Desenvolvido por <a href="https://www.youtube.com/@toriotools" target="_blank" rel="noopener noreferrer" className="font-semibold text-sky-400 hover:text-sky-300 underline transition-colors">Tório Tools</a>.
+        </p>
+        <p className="mt-2">
           Esta versão utiliza exclusivamente a API do YouTube Data v3. Uma chave de API válida é obrigatória.
         </p>
          <p className="mt-1 text-xs">
